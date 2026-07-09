@@ -755,6 +755,17 @@
                     </div>
 
                     <div class="bg-white/60 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white shadow-xl shadow-slate-200/40">
+                        <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center gap-2">🔄 面板轮询刷新设置</h3>
+                        <p class="text-xs text-slate-500 mb-4 font-medium">控制前端自动刷新频率。数值越低越实时，但会消耗更多 CF Pages 请求额度（免费版每日约 10,000 次）。调整后点击下方按钮即时生效。</p>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                            <div><label class="block text-xs font-bold text-slate-500 mb-1">主数据刷新间隔 (毫秒)</label><input type="number" v-model.number="pollingSettings.dataInterval" min="1000" step="500" class="w-full bg-white/50 border p-2.5 rounded-xl text-sm font-medium text-slate-700"></div>
+                            <div><label class="block text-xs font-bold text-slate-500 mb-1">探针数据刷新间隔 (毫秒)</label><input type="number" v-model.number="pollingSettings.probeInterval" min="1000" step="500" class="w-full bg-white/50 border p-2.5 rounded-xl text-sm font-medium text-slate-700"></div>
+                            <div><label class="block text-xs font-bold text-slate-500 mb-1">Ping 心跳间隔 (毫秒)</label><input type="number" v-model.number="pollingSettings.pingInterval" min="1000" step="500" class="w-full bg-white/50 border p-2.5 rounded-xl text-sm font-medium text-slate-700"></div>
+                        </div>
+                        <button @click="applyPollingSettings" class="bg-indigo-600 text-white px-8 py-3 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-md">💾 立即生效配置</button>
+                    </div>
+
+                    <div class="bg-white/60 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white shadow-xl shadow-slate-200/40">
                         <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center justify-between">
                             <div class="flex items-center gap-2">📊 探针大盘外观与设置</div>
                             <button @click="pullGithubNodes" class="text-xs bg-emerald-100 text-emerald-600 px-3 py-1.5 rounded-lg font-bold hover:bg-emerald-200 transition-colors shadow-sm">🔄 云端拉取最新主题/测速库</button>
@@ -945,6 +956,7 @@
                 const pingNodes = reactive({ ct: [], cu: [], cm: [] });
 
                 const probeSys = reactive({ theme: 'theme1', is_public: 'true', site_title: 'Server Monitor Pro', custom_bg: '', custom_css: '', custom_head: '', custom_script: '', report_interval: '5', visits_total: '0', visits_today: '0', ping_node_ct: 'default', ping_node_cu: 'default', ping_node_cm: 'default', enable_popup: 'false', popup_content: '', tg_notify: 'false', tg_bot_token: '', tg_chat_id: '' });
+                const pollingSettings = reactive(JSON.parse(localStorage.getItem('kui_polling_settings') || '{"dataInterval":5000,"probeInterval":10000,"pingInterval":30000}'));
                 const publicProbeServers = ref([]);
                 const probeView = ref(localStorage.getItem('monitor_preferred_view') || 'card');
                 const probeDetailId = ref(null); const probeDetail = ref({});
@@ -1189,9 +1201,16 @@
                 let isFetchingKUI = false;
                 const refreshData = async () => {
                     if (isFetchingKUI) return; isFetchingKUI = true;
+                    const socks5Snapshot = {};
+                    for (const s of servers.value) {
+                        if (s.socks5_enable == 1) socks5Snapshot[s.ip] = { socks5_addr: s.socks5_addr, socks5_port: s.socks5_port, socks5_user: s.socks5_user, socks5_pass: s.socks5_pass, socks5_mode: s.socks5_mode, socks5_domains: s.socks5_domains };
+                    }
                     try {
                         const res = await fetchApi('/api/data'); const data = await res.json();
                         servers.value = data.servers || []; nodes.value = data.nodes || []; users.value = data.users || [];
+                        for (const s of servers.value) {
+                            if (socks5Snapshot[s.ip]) Object.assign(s, socks5Snapshot[s.ip]);
+                        }
                         if (data.siteTitle) { siteTitle.value = data.siteTitle; siteTitleInput.value = data.siteTitle; }
                         if (data.mySubToken) mySubToken.value = data.mySubToken;
                         servers.value.forEach(s => { 
@@ -1409,13 +1428,18 @@
 
                 let dataTimer = null; let pingTimer = null; let probeTimer = null;
                 const startPolling = () => { 
-                    if (!dataTimer) { refreshData(); dataTimer = setInterval(() => { if (isLoggedIn.value && !document.hidden && activeTab.value !== 'probe') refreshData(); }, 2500); }
-                    if (!pingTimer) { sendUiPing(); pingTimer = setInterval(() => { if (isLoggedIn.value && !document.hidden) sendUiPing(); }, 10000); }
+                    if (!dataTimer) { refreshData(); dataTimer = setInterval(() => { if (isLoggedIn.value && !document.hidden && activeTab.value !== 'probe') refreshData(); }, pollingSettings.dataInterval); }
+                    if (!pingTimer) { sendUiPing(); pingTimer = setInterval(() => { if (isLoggedIn.value && !document.hidden) sendUiPing(); }, pollingSettings.pingInterval); }
                 };
                 const startProbePolling = () => { 
-                    if (!probeTimer) { fetchProbeData(); probeTimer = setInterval(() => { if (!document.hidden && (!isLoggedIn.value || activeTab.value === 'probe')) fetchProbeData(); }, 4000); } 
+                    if (!probeTimer) { fetchProbeData(); probeTimer = setInterval(() => { if (!document.hidden && (!isLoggedIn.value || activeTab.value === 'probe')) fetchProbeData(); }, pollingSettings.probeInterval); } 
                 }
                 const stopPolling = () => { if (dataTimer) { clearInterval(dataTimer); dataTimer = null; } if (pingTimer) { clearInterval(pingTimer); pingTimer = null; } };
+                const applyPollingSettings = () => {
+                    localStorage.setItem('kui_polling_settings', JSON.stringify(pollingSettings));
+                    if (isLoggedIn.value) { stopPolling(); startPolling(); }
+                    stopProbePolling(); startProbePolling();
+                };
 
                 onMounted(() => {
                     fetchProbeData(); startProbePolling();
@@ -1435,7 +1459,8 @@
                     qrModalOpen, qrCodeImage, showQrCode, 
                     showWelcomePopup, closePopup,
                     availableThemes, pingNodes, pullGithubNodes, hasCustomCssFlag,
-                    proxyConfig, toggleNodeProxy, saveProxyConfig, switchProxyIP, proxyPool, loadProxyPool
+                    proxyConfig, toggleNodeProxy, saveProxyConfig, switchProxyIP, proxyPool, loadProxyPool,
+                    pollingSettings, applyPollingSettings
                 };
             }
         }).mount('#app');
