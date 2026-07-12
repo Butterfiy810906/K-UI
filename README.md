@@ -162,8 +162,22 @@ DEV 修复情况
 | `ADMIN_PASSWORD` | KUI 后台管理员强密码 | 随机 24 位以上 | ✅ |
 | `PROXY_USER` | Full Deploy 安装的住宅 SOCKS5 用户名 | `res_proxy` | ✅ |
 | `PROXY_PASS` | 住宅 SOCKS5 强密码 | 随机 32 位以上 | ✅ |
+| `REALTIME_URL` | Realtime Worker HTTPS 地址 | `https://kui-realtime.<账号>.workers.dev` | 推荐 |
 
 虽然 Worker 代码对管理员账号保留了兼容默认值，但生产部署必须显式设置管理员账号和密码。`PROXY_USER`、`PROXY_PASS` 没有可用默认值；缺少任意一个时，住宅代理 API 返回 `503`，SOCKS5 监听器拒绝连接。
+
+`REALTIME_URL` 未配置时系统继续使用原有 HTTP 模式。配置后，Core Agent、住宅代理和管理员浏览器优先使用 WebSocket；连接中断满 30 秒后自动启用 HTTP fallback，恢复连接后自动停止高频 HTTP 请求。
+
+### 部署 Realtime Worker
+
+Realtime Worker 位于 `realtime/`，包含每台 VPS 一个 `VpsPresence` Durable Object 和一个 `DashboardHub` Durable Object。部署前修改 `realtime/wrangler.jsonc` 中的账号、D1 和 `PAGES_ORIGIN`，确保 `DB` 与 Pages 绑定的是同一个 D1 数据库，然后执行：
+
+```bash
+npx wrangler secret put ADMIN_PASSWORD --config realtime/wrangler.jsonc
+npx wrangler deploy --config realtime/wrangler.jsonc
+```
+
+将部署结果中的 HTTPS 地址写入 Pages 的 `REALTIME_URL` 环境变量并重新部署 Pages。Realtime Worker 的 `ADMIN_USERNAME` 必须与 Pages 一致，`ADMIN_PASSWORD` 必须通过 secret 设置且与 Pages 一致。
 
 可以在本地生成随机密码：
 
@@ -440,6 +454,28 @@ LEGACY_AGENT_AUTH=false
 - D1 schema 在每个 Worker 实例中只初始化一次，历史上报回执每小时最多清理一次。
 
 按 3 台 VPS、后台每天打开约 1 小时估算，Pages Functions 通常约每日 1 万次；10 台 VPS 空闲运行通常约每日 3 万次，为浏览器访问和突发操作保留较大余量。D1 写入量受节点流量影响，属于次要优化目标。不要将后台刷新或探针上报长期设置为 1-5 秒，否则会显著增加 Pages Functions 消耗。
+
+### Durable Objects 实时模式
+
+仓库同时提供 `realtime/` 独立 Worker，使用每台 VPS 一个 `VpsPresence` Durable Object 和一个 `DashboardHub` Durable Object：
+
+- Core Agent 与住宅管理器分别保持 Hibernation WebSocket。
+- 浏览器后台只保持一条 Dashboard WebSocket，状态变化由服务端主动推送。
+- 普通指标约 15 秒进入 Presence，最多每 60 秒转发一次到 Dashboard；上下线、主备切换和出口变化立即推送。
+- WebSocket 在线时，HTTP 仅每 5 分钟执行一次 D1 权威检查点。
+- WebSocket 断开后先重连；持续 30 秒仍未恢复时，自动切入现有 HTTP 心跳和配置轮询。
+- WebSocket 恢复后自动停止高频 HTTP 备份，不需要人工切换。
+- 未配置 `realtime_url` 或 Python WebSocket 包不可用时，系统保持纯 HTTP 模式。
+
+Realtime Worker 必须绑定与 Pages 相同的 D1，并通过 Wrangler Secret 配置与 Pages 相同的 `ADMIN_PASSWORD`。`realtime/wrangler.jsonc` 中的账户 ID、D1 ID 和 `PAGES_ORIGIN` 是部署实例参数，迁移到其他账户时必须修改。
+
+```bash
+cd realtime
+wrangler secret put ADMIN_PASSWORD
+wrangler deploy
+```
+
+部署完成后，在生产 D1 的 `sys_config` 中将 `realtime_url` 设置为 Worker 地址。Agent、住宅管理器和浏览器会在下一次权威配置同步时自动接入。
 
 ---
 

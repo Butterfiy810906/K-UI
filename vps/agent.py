@@ -14,6 +14,14 @@ import tempfile
 import shutil
 import hashlib
 import threading
+try:
+    from realtime_client import RealtimeChannel
+except ImportError:
+    class RealtimeChannel:
+        def __init__(self, *args, **kwargs): self.connected = False; self.enabled = False; self.ever_connected = False; self.last_disconnected = 0; self.started_at = 0
+        def start(self): pass
+        def stop(self): pass
+        def send(self, data, message_type="status"): return False
 from datetime import datetime
 
 # 强制系统编码锁
@@ -50,6 +58,7 @@ PROXY_API = os.environ.get("PROXY_API_URL") or (env.get("proxy_api") if isinstan
 # 住宅IP代理控制器认证：优先使用控制器专用 Basic Auth，回退为 Bearer Token
 PROXY_CTRL_USER = os.environ.get("PROXY_CTRL_USER", env.get("proxy_ctrl_user", "") if isinstance(env, dict) else "")
 PROXY_CTRL_PASS = os.environ.get("PROXY_CTRL_PASS", env.get("proxy_ctrl_pass", "") if isinstance(env, dict) else "")
+REALTIME_URL = env.get("realtime_url", "") if isinstance(env, dict) else ""
 
 def _proxy_ctrl_headers():
     if PROXY_API.rstrip('/') != BASE_URL.rstrip('/') and PROXY_CTRL_USER and PROXY_CTRL_PASS:
@@ -90,31 +99,37 @@ def check_for_update():
     if now - last_update_check < 3600:
         return False
     last_update_check = now
-    temp_path = os.path.abspath(__file__) + ".update.py"
+    targets = (("realtime-client", os.path.join(os.path.dirname(os.path.abspath(__file__)), "realtime_client.py")), ("agent", os.path.abspath(__file__)))
+    temporary_files = []
+    changed = []
     try:
-        update_url = f"{BASE_URL}/api/agent_update?ip={urllib.parse.quote(VPS_IP, safe='')}"
-        request = urllib.request.Request(update_url, headers=HEADERS)
-        with urllib.request.urlopen(request, timeout=20) as response:
-            source = response.read(2 * 1024 * 1024 + 1)
-            expected_hash = response.headers.get("X-Agent-SHA256", "").lower()
-        if not source or len(source) > 2 * 1024 * 1024 or not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or hashlib.sha256(source).hexdigest() != expected_hash:
-            raise ValueError("agent update checksum mismatch")
-        with open(__file__, "rb") as current:
-            if hashlib.sha256(current.read()).hexdigest() == expected_hash:
-                return False
-        with open(temp_path, "wb") as update_file:
-            update_file.write(source)
-        os.chmod(temp_path, 0o700)
-        checked = subprocess.run([sys.executable, "-m", "py_compile", temp_path], capture_output=True, text=True, timeout=30)
-        if checked.returncode != 0:
-            raise ValueError(f"agent update compile failed: {checked.stderr.strip()}")
-        os.replace(temp_path, os.path.abspath(__file__))
-        print(f"[agent] updated to {expected_hash[:12]}, restarting", flush=True)
+        for component, target in targets:
+            temp_path = target + ".update.py"
+            temporary_files.append(temp_path)
+            update_url = f"{BASE_URL}/api/agent_update?ip={urllib.parse.quote(VPS_IP, safe='')}&component={component}"
+            request = urllib.request.Request(update_url, headers=HEADERS)
+            with urllib.request.urlopen(request, timeout=20) as response:
+                source = response.read(2 * 1024 * 1024 + 1)
+                expected_hash = response.headers.get("X-Agent-SHA256", "").lower()
+            if not source or len(source) > 2 * 1024 * 1024 or not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or hashlib.sha256(source).hexdigest() != expected_hash:
+                raise ValueError(f"{component} update checksum mismatch")
+            current_hash = hashlib.sha256(open(target, "rb").read()).hexdigest() if os.path.exists(target) else ""
+            if current_hash == expected_hash:
+                continue
+            with open(temp_path, "wb") as update_file: update_file.write(source)
+            os.chmod(temp_path, 0o700)
+            checked = subprocess.run([sys.executable, "-m", "py_compile", temp_path], capture_output=True, text=True, timeout=30)
+            if checked.returncode != 0: raise ValueError(f"{component} update compile failed: {checked.stderr.strip()}")
+            changed.append((temp_path, target))
+        if not changed: return False
+        for temp_path, target in changed: os.replace(temp_path, target)
+        print("[agent] components updated, restarting", flush=True)
         os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
     except Exception as error:
         print(f"[agent] update check failed: {error}", flush=True)
         try:
-            if os.path.exists(temp_path): os.remove(temp_path)
+            for temp_path in temporary_files:
+                if os.path.exists(temp_path): os.remove(temp_path)
         except Exception:
             pass
     return False
@@ -123,6 +138,9 @@ def check_for_update():
 global_interval = 5
 fast_mode = False
 config_wakeup = threading.Event()
+heartbeat_wakeup = threading.Event()
+realtime_channel = None
+last_http_report = 0
 
 # 🌟 增加全局 Ping 状态缓存锁，防止在非测速轮次上传 '0' 导致前端图表归零
 last_pings = {"ct": "0", "cu": "0", "cm": "0", "bd": "0"}
@@ -717,8 +735,8 @@ def build_singbox_config(nodes, proxy_cfg=None, peers=None, mesh=None, socks5_ou
     else:
         subprocess.run(["systemctl", "start", "sing-box"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
-def report_status(current_nodes, argo_urls):
-    global last_reported_bytes, global_interval, fast_mode, dynamic_ping, pending_report_id, pending_report_bytes, pending_node_traffic
+def report_status(current_nodes, argo_urls, force_http=False, allow_http=True):
+    global last_reported_bytes, global_interval, fast_mode, dynamic_ping, pending_report_id, pending_report_bytes, pending_node_traffic, last_http_report
     status = get_system_status(global_interval)
     status["ip"] = VPS_IP
     status["argo_urls"] = argo_urls
@@ -738,10 +756,18 @@ def report_status(current_nodes, argo_urls):
 
     if not pending_report_id:
         pending_report_id = f"{VPS_IP}:{time.time_ns()}"
-        pending_report_bytes = {k: v for k, v in pending_bytes.items() if k in current_ids}
-        pending_node_traffic = deltas
+    # Keep accumulating against the last successful HTTP baseline. WebSocket
+    # updates are display-only and must not advance billable traffic counters.
+    pending_report_bytes = {k: v for k, v in pending_bytes.items() if k in current_ids}
+    pending_node_traffic = deltas
     status["node_traffic"] = pending_node_traffic
     status["report_id"] = pending_report_id
+
+    websocket_sent = realtime_channel.send(status) if realtime_channel and realtime_channel.connected else False
+    if websocket_sent and not force_http and time.time() - last_http_report < 300:
+        return True
+    if not websocket_sent and not allow_http:
+        return False
 
     try: 
         req = urllib.request.Request(REPORT_URL, data=json.dumps(status).encode(), headers=HEADERS)
@@ -751,6 +777,7 @@ def report_status(current_nodes, argo_urls):
         pending_report_id = None
         pending_report_bytes = None
         pending_node_traffic = None
+        last_http_report = time.time()
         if resp_data and "interval" in resp_data:
             global_interval = min(max(1, int(resp_data["interval"])), 3600)
         new_fast_mode = bool(resp_data.get("fast_mode"))
@@ -855,11 +882,24 @@ def report_proxy_status():
         print(f"[agent] proxy status report failed: {error}", flush=True)
 
 def fetch_and_apply_configs():
+    global REALTIME_URL, realtime_channel
     try:
         with urllib.request.urlopen(urllib.request.Request(f"{API_URL}?ip={VPS_IP}", headers=HEADERS), timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
         if data.get("success"):
             persist_agent_token(data.get("agent_token"))
+            new_realtime_url = data.get("realtime_url") or ""
+            if new_realtime_url and new_realtime_url != REALTIME_URL:
+                REALTIME_URL = new_realtime_url
+                env["realtime_url"] = new_realtime_url
+                try:
+                    temp_config = CONF_FILE + ".tmp"
+                    with open(temp_config, "w", encoding="utf-8") as config_file: json.dump(env, config_file)
+                    os.chmod(temp_config, 0o600); os.replace(temp_config, CONF_FILE)
+                except Exception: pass
+                if realtime_channel: realtime_channel.stop()
+                realtime_channel = create_realtime_channel()
+                realtime_channel.start()
             nodes = data.get("configs", [])
             global current_proxy_config
             pc = fetch_proxy_config()
@@ -872,7 +912,14 @@ def fetch_and_apply_configs():
                 if exit_ip and exit_ip != "ANY":
                     peers = [p for p in peers if p.get("country") == exit_ip or p.get("socks_ip") == exit_ip or p.get("ip") == exit_ip]
             socks5_outbound = data.get("socks5_outbound", {})
-            build_singbox_config(nodes, current_proxy_config, peers, mesh, socks5_outbound)
+            try:
+                build_singbox_config(nodes, current_proxy_config, peers, mesh, socks5_outbound)
+                if realtime_channel and realtime_channel.connected:
+                    realtime_channel.send({"success": True, "applied_at": int(time.time() * 1000)}, "config.result")
+            except Exception as error:
+                if realtime_channel and realtime_channel.connected:
+                    realtime_channel.send({"success": False, "error": str(error)[:500], "applied_at": int(time.time() * 1000)}, "config.result")
+                raise
             return nodes
     except Exception as error:
         print(f"[agent] config fetch/apply failed: {error}", flush=True)
@@ -881,16 +928,36 @@ def fetch_and_apply_configs():
 if __name__ == "__main__":
     heartbeat_state = {"nodes": [], "argo_urls": []}
 
+    def on_realtime_message(message):
+        if message.get("type") in {"config.refresh", "transport.connected", "transport.disconnected"}: config_wakeup.set()
+        if message.get("type") in {"transport.connected", "transport.disconnected"}: heartbeat_wakeup.set()
+
+    def create_realtime_channel():
+        return RealtimeChannel(REALTIME_URL, VPS_IP, TOKEN, "core", on_realtime_message)
+
+    realtime_channel = create_realtime_channel()
+    realtime_channel.start()
+
     def heartbeat_loop():
         while True:
             started = time.monotonic()
             try:
-                report_status(list(heartbeat_state["nodes"]), list(heartbeat_state["argo_urls"]))
+                websocket_online = bool(realtime_channel and realtime_channel.connected)
+                fallback_ready = not realtime_channel or not realtime_channel.enabled or (realtime_channel.ever_connected and time.time() - realtime_channel.last_disconnected >= 30) or (not realtime_channel.ever_connected and time.time() - realtime_channel.started_at >= 30)
+                report_status(list(heartbeat_state["nodes"]), list(heartbeat_state["argo_urls"]), force_http=not websocket_online, allow_http=websocket_online or fallback_ready)
             except Exception as error:
                 print(f"[agent] heartbeat loop error: {error}", flush=True)
             elapsed = time.monotonic() - started
-            heartbeat_interval = min(max(15, global_interval), 90)
-            time.sleep(max(1, heartbeat_interval - min(heartbeat_interval - 1, elapsed)))
+            if realtime_channel and realtime_channel.connected:
+                heartbeat_interval = 15
+            elif realtime_channel and realtime_channel.enabled and not realtime_channel.ever_connected and time.time() - realtime_channel.started_at < 30:
+                heartbeat_interval = max(1, 30 - (time.time() - realtime_channel.started_at))
+            elif realtime_channel and realtime_channel.ever_connected and time.time() - realtime_channel.last_disconnected < 30:
+                heartbeat_interval = max(1, 30 - (time.time() - realtime_channel.last_disconnected))
+            else:
+                heartbeat_interval = min(max(90, global_interval), 300)
+            heartbeat_wakeup.wait(timeout=max(1, heartbeat_interval - min(heartbeat_interval - 1, elapsed)))
+            heartbeat_wakeup.clear()
 
     time.sleep(2)
     threading.Thread(target=heartbeat_loop, name="kui-heartbeat", daemon=True).start()
@@ -906,6 +973,6 @@ if __name__ == "__main__":
         elapsed = time.monotonic() - loop_started
         if elapsed > 20:
             print(f"[agent] slow loop completed in {elapsed:.1f}s", flush=True)
-        config_interval = 30 if fast_mode else 300
+        config_interval = 300 if realtime_channel and realtime_channel.connected else (30 if fast_mode else 300)
         config_wakeup.wait(timeout=max(1, config_interval - min(config_interval - 1, elapsed)))
         config_wakeup.clear()

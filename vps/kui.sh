@@ -71,7 +71,7 @@ echo "[3/7] 📦 正在安装底层网络依赖..."
 ALIYUN_OK=0
 if [ "$OS" = "alpine" ]; then
     apk update || echo "⚠️ apk update 失败，尝试使用现有缓存安装。"
-    apk add python3 curl openssl iptables ip6tables coreutils bash tar libc6-compat gcompat iproute2
+    apk add python3 py3-websocket-client curl openssl iptables ip6tables coreutils bash tar libc6-compat gcompat iproute2
 else
     if apt-get update -y >/tmp/kui_apt_update.log 2>&1; then
         cat /tmp/kui_apt_update.log
@@ -87,7 +87,7 @@ else
         fi
         exit 1
     fi
-    apt-get install -y python3 curl openssl iptables coreutils bash tar iproute2 iputils-ping
+    apt-get install -y python3 python3-websocket curl openssl iptables coreutils bash tar iproute2 iputils-ping
 fi
 
 echo "[4/7] ⚙️ 部署 Sing-box 代理核心..."
@@ -155,6 +155,17 @@ python3 -m py_compile "$AGENT_TEMP"
 mv "$AGENT_TEMP" /opt/kui/agent.py
 rm -f "$AGENT_HEADERS"
 chmod 700 /opt/kui/agent.py
+
+REALTIME_CLIENT_URL="${API_URL}/api/agent_update?ip=${VPS_IP}&component=realtime-client"
+REALTIME_CLIENT_TEMP="/opt/kui/realtime_client.py.download"; REALTIME_CLIENT_HEADERS="/opt/kui/realtime_client.py.headers"
+curl -fsSL --retry 3 --retry-delay 2 -A "$CURL_USER_AGENT" -D "$REALTIME_CLIENT_HEADERS" -H "Authorization: ${TOKEN}" "$REALTIME_CLIENT_URL" -o "$REALTIME_CLIENT_TEMP"
+EXPECTED_REALTIME_SHA=$(tr -d '\r' < "$REALTIME_CLIENT_HEADERS" | awk '/^[Xx]-[Aa]gent-[Ss][Hh][Aa]256:/ {print tolower($2)}' | tail -n 1)
+ACTUAL_REALTIME_SHA=$(sha256sum "$REALTIME_CLIENT_TEMP" | awk '{print $1}')
+[ -n "$EXPECTED_REALTIME_SHA" ] && [ "$EXPECTED_REALTIME_SHA" = "$ACTUAL_REALTIME_SHA" ] || { echo "❌ realtime_client.py SHA256 校验失败"; exit 1; }
+python3 -m py_compile "$REALTIME_CLIENT_TEMP"
+mv "$REALTIME_CLIENT_TEMP" /opt/kui/realtime_client.py
+rm -f "$REALTIME_CLIENT_HEADERS"
+chmod 700 /opt/kui/realtime_client.py
 
 echo "[6/7] 🛡️ 智能注册底层守护进程并启动..."
 if [ "$OS" = "alpine" ]; then

@@ -101,19 +101,20 @@ install_dependencies() {
         apt)
             apt-get update -q || { echo "❌ apt-get update 失败"; exit 1; }
             apt-get install -y --no-install-recommends \
-                openvpn python3 curl iproute2 iptables cron psmisc \
+                openvpn python3 python3-websocket curl iproute2 iptables cron psmisc \
                 || { echo "❌ 依赖安装失败"; exit 1; }
             ;;
         apk)
             apk update || true
             apk add --no-cache \
-                openvpn python3 curl iproute2 iptables dcron psmisc \
+                openvpn python3 py3-websocket-client curl iproute2 iptables dcron psmisc \
                 || { echo "❌ apk 依赖安装失败"; exit 1; }
             ;;
         yum|dnf)
             $PKG_MGR install -y \
                 openvpn python3 curl iproute2 iptables cron psmisc \
                 || { echo "❌ $PKG_MGR 依赖安装失败"; exit 1; }
+            $PKG_MGR install -y python3-websocket-client >/dev/null 2>&1 || echo "⚠️ 未找到 python3-websocket-client，将使用 HTTP 备份模式。"
             ;;
     esac
     echo "[+] 依赖安装完成"
@@ -183,11 +184,12 @@ download_agents() {
     }
     download_component proxy-manager lite_manager.py || { echo "❌ 下载 lite_manager.py 失败"; exit 1; }
     download_component proxy-server proxy_server.py || { echo "❌ 下载 proxy_server.py 失败"; exit 1; }
-    python3 -m py_compile lite_manager.py proxy_server.py || {
+    download_component realtime-client realtime_client.py || { echo "❌ 下载 realtime_client.py 失败"; exit 1; }
+    python3 -m py_compile lite_manager.py proxy_server.py realtime_client.py || {
         echo "❌ 下载的代理引擎不是有效 Python 文件"
         exit 1
     }
-    chmod 644 /opt/proxy_lite/lite_manager.py /opt/proxy_lite/proxy_server.py
+    chmod 700 /opt/proxy_lite/lite_manager.py /opt/proxy_lite/proxy_server.py /opt/proxy_lite/realtime_client.py
     echo "[+] 引擎文件下载完成"
 }
 
@@ -207,6 +209,7 @@ PROXY_USER_B64="${PROXY_USER_B64}"
 PROXY_PASS_B64="${PROXY_PASS_B64}"
 AGENT_TOKEN="${AGENT_TOKEN}"
 VPS_IP="${VPS_IP}"
+REALTIME_URL="${REALTIME_URL:-}"
 PYTHONIOENCODING="utf-8"
 LANG="C.UTF-8"
 EOF

@@ -3,6 +3,14 @@ import base64, csv, os, subprocess, threading, time, urllib.request, urllib.pars
 from collections import deque
 from pathlib import Path
 import proxy_server
+try:
+    from realtime_client import RealtimeChannel
+except ImportError:
+    class RealtimeChannel:
+        def __init__(self, *args, **kwargs): self.connected = False; self.enabled = False; self.ever_connected = False; self.last_disconnected = 0; self.started_at = 0
+        def start(self): pass
+        def stop(self): pass
+        def send(self, data, message_type="status"): return False
 
 API_URL = "https://www.vpngate.net/api/iphone/"
 C2_URL = os.environ.get("C2_URL", "https://YOUR_CONTROLLER_DOMAIN")
@@ -31,6 +39,11 @@ last_switch_trigger = 0
 last_config_sync = 0
 last_config_log = ""
 last_update_check = 0
+REALTIME_URL = os.environ.get("REALTIME_URL", "")
+realtime_channel = None
+config_wakeup = threading.Event()
+heartbeat_wakeup = threading.Event()
+last_http_report = 0
 
 state_lock = threading.Lock()
 dead_ips = set()
@@ -98,7 +111,7 @@ def check_for_updates():
     if not AGENT_TOKEN or now - last_update_check < 3600:
         return
     last_update_check = now
-    components = (("proxy-manager", Path(__file__).resolve()), ("proxy-server", (Path(__file__).parent / "proxy_server.py").resolve()))
+    components = (("realtime-client", (Path(__file__).parent / "realtime_client.py").resolve()), ("proxy-manager", Path(__file__).resolve()), ("proxy-server", (Path(__file__).parent / "proxy_server.py").resolve()))
     staged = []
     temporary_files = []
     try:
@@ -166,15 +179,21 @@ def fetch_controller_config():
     return None
 
 def update_config_loop():
-    global target_country, last_switch_trigger, PROXY_PORT, tun_main, tun_backup, last_config_log
+    global target_country, last_switch_trigger, PROXY_PORT, tun_main, tun_backup, last_config_log, REALTIME_URL, realtime_channel
     while True:
         try:
             check_for_updates()
             data = fetch_controller_config()
             if not data:
-                time.sleep(300)
+                config_wakeup.wait(timeout=300); config_wakeup.clear()
                 continue
             desired_country = str(data.get("0") or data.get("country") or "JP").upper()
+            new_realtime_url = data.get("realtime_url") or ""
+            if new_realtime_url and new_realtime_url != REALTIME_URL:
+                REALTIME_URL = new_realtime_url
+                if realtime_channel: realtime_channel.stop()
+                realtime_channel = create_realtime_channel()
+                realtime_channel.start()
             switch_trigger = int(data.get("switch_trigger", 0))
             new_port = int(data.get("port", 7920))
             config_log = f"country={desired_country}, port={new_port}, trigger={switch_trigger}"
@@ -221,12 +240,17 @@ def update_config_loop():
                     tun_backup.ready = False; tun_backup.process = None; tun_backup.entry_ip = ""; tun_backup.egress_ip = ""
                     
                     last_switch_trigger = switch_trigger
+            if realtime_channel and realtime_channel.connected:
+                realtime_channel.send({"success": True, "country": desired_country, "switch_trigger": switch_trigger, "applied_at": int(time.time() * 1000)}, "config.result")
         except Exception as e:
             print(f"[cfg] 拉取配置失败: {e}", flush=True)
-        time.sleep(300)
+            if realtime_channel and realtime_channel.connected:
+                realtime_channel.send({"success": False, "error": str(e)[:500], "applied_at": int(time.time() * 1000)}, "config.result")
+        config_wakeup.wait(timeout=300)
+        config_wakeup.clear()
 
 def c2_heartbeat_loop():
-    global public_ip, PROXY_PORT, tun_main, tun_backup
+    global public_ip, PROXY_PORT, tun_main, tun_backup, last_http_report
     while True:
         if not public_ip or public_ip == "Unknown_IP": get_public_ip()
         details = []
@@ -243,12 +267,33 @@ def c2_heartbeat_loop():
                         "node_ip": tun.egress_ip if tun.egress_ip else tun.entry_ip
                     })
         
-        payload = json.dumps({"ip": VPS_IP, "socks_ip": public_ip, "details": details, "logs": get_recent_logs()}).encode('utf-8')
+        status = {"ip": VPS_IP, "socks_ip": public_ip, "details": details, "logs": get_recent_logs()}
+        websocket_sent = realtime_channel.send(status) if realtime_channel and realtime_channel.connected else False
         try:
-            req = urllib.request.Request(f"{C2_URL}{C2_API_PREFIX}/report", data=payload, headers=get_c2_headers(), method='POST')
-            urllib.request.urlopen(req, timeout=10)
-        except Exception as e: pass
-        time.sleep(90)
+            fallback_ready = not realtime_channel or not realtime_channel.enabled or (realtime_channel.ever_connected and time.time() - realtime_channel.last_disconnected >= 30) or (not realtime_channel.ever_connected and time.time() - realtime_channel.started_at >= 30)
+            if (websocket_sent and time.time() - last_http_report >= 300) or (not websocket_sent and fallback_ready):
+                req = urllib.request.Request(f"{C2_URL}{C2_API_PREFIX}/report", data=json.dumps(status).encode('utf-8'), headers=get_c2_headers(), method='POST')
+                with urllib.request.urlopen(req, timeout=10) as response: response.read(1)
+                last_http_report = time.time()
+        except Exception as error:
+            print(f"[c2] 状态上报失败: {error}", flush=True)
+        if realtime_channel and realtime_channel.connected:
+            interval = 15
+        elif realtime_channel and realtime_channel.enabled and not realtime_channel.ever_connected and time.time() - realtime_channel.started_at < 30:
+            interval = max(1, 30 - (time.time() - realtime_channel.started_at))
+        elif realtime_channel and realtime_channel.ever_connected and time.time() - realtime_channel.last_disconnected < 30:
+            interval = max(1, 30 - (time.time() - realtime_channel.last_disconnected))
+        else:
+            interval = 90
+        heartbeat_wakeup.wait(timeout=interval)
+        heartbeat_wakeup.clear()
+
+def on_realtime_message(message):
+    if message.get("type") in {"config.refresh", "transport.connected", "transport.disconnected"}: config_wakeup.set()
+    if message.get("type") in {"transport.connected", "transport.disconnected"}: heartbeat_wakeup.set()
+
+def create_realtime_channel():
+    return RealtimeChannel(REALTIME_URL, VPS_IP, AGENT_TOKEN, "proxy", on_realtime_message)
 
 def setup_env():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -587,7 +632,7 @@ def maintain_pool():
         time.sleep(2)
 
 def main():
-    global PROXY_PORT, tun_main, target_country, last_switch_trigger
+    global PROXY_PORT, tun_main, target_country, last_switch_trigger, REALTIME_URL, realtime_channel
     if os.geteuid() != 0: return
     check_for_updates()
     get_public_ip()
@@ -603,9 +648,13 @@ def main():
             PROXY_PORT = int(data.get("port", 7920))
             target_country = str(data.get("0") or data.get("country") or "JP").upper()
             last_switch_trigger = int(data.get("switch_trigger", 0))
+            REALTIME_URL = data.get("realtime_url") or REALTIME_URL
     except: pass
 
     print("========================================", flush=True)
+
+    realtime_channel = create_realtime_channel()
+    realtime_channel.start()
     print(f"  Proxy Controller (主备双活引擎) 启动！端口: {PROXY_PORT}", flush=True)
     print("========================================", flush=True)
 

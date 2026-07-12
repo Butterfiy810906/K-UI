@@ -645,7 +645,8 @@ async function proxyLocal(method, subPath, req, env) {
                 }
                 const rawCountry = (slotMap["0"] || slotMap.country || "JP").toString().toUpperCase();
                 const proxyCfg = { enabled: slotMap.enabled !== false, port: slotMap.port || 7920, user: proxyUser, pass: proxyPass, country: rawCountry };
-                return new Response(JSON.stringify({ ...slotMap, "0": rawCountry, "port": slotMap.port || 7920, "country": rawCountry, switch_trigger: slotMap.switch_trigger || 0, proxy: proxyCfg }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0' } });
+                const realtime = await db.prepare("SELECT val FROM sys_config WHERE key = 'realtime_url'").first();
+                return new Response(JSON.stringify({ ...slotMap, "0": rawCountry, "port": slotMap.port || 7920, "country": rawCountry, switch_trigger: slotMap.switch_trigger || 0, proxy: proxyCfg, realtime_url: env.REALTIME_URL || realtime && realtime.val || '' }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0' } });
             } catch (e) { return new Response(JSON.stringify({ success: false, error: "GET config failed: " + e.message }), { status: 500, headers: { 'Content-Type': 'application/json' } }); }
         }
         if (method === 'POST') {
@@ -817,7 +818,7 @@ export async function onRequest(context) {
         if (!(await verifyAgent(request.headers.get('Authorization'), ip, db, env))) return new Response('Unauthorized', { status: 401 });
         if (!env.ASSETS) return Response.json({ error: 'ASSETS binding is unavailable' }, { status: 503 });
         const component = new URL(request.url).searchParams.get('component') || 'agent';
-        const assets = { agent: '/vps/agent.py', 'proxy-manager': '/vps/lite_manager.py', 'proxy-server': '/vps/proxy_server.py', 'proxy-installer': '/vps/residential-proxy.sh', 'full-installer': '/vps/kui.sh' };
+        const assets = { agent: '/vps/agent.py', 'realtime-client': '/vps/realtime_client.py', 'proxy-manager': '/vps/lite_manager.py', 'proxy-server': '/vps/proxy_server.py', 'proxy-installer': '/vps/residential-proxy.sh', 'full-installer': '/vps/kui.sh' };
         if (!assets[component]) return Response.json({ error: 'Unknown agent component' }, { status: 400 });
         const assetUrl = new URL(assets[component], request.url);
         const asset = await env.ASSETS.fetch(assetUrl);
@@ -999,7 +1000,8 @@ export async function onRequest(context) {
             if (s && s.socks5_enable) socks5_outbound = { enabled: true, addr: s.socks5_addr, port: s.socks5_port, user: s.socks5_user, pass: s.socks5_pass, mode: s.socks5_mode || "global", domains: s.socks5_domains || "" };
         } catch (ex) {}
         const serverAuth = await db.prepare("SELECT agent_token FROM servers WHERE ip = ?").bind(ip).first();
-        return Response.json({ success: true, configs: machineNodes, agent_token: serverAuth && serverAuth.agent_token || '', proxy: proxyCfg, socks5_outbound: socks5_outbound });
+        const realtime = await db.prepare("SELECT val FROM sys_config WHERE key = 'realtime_url'").first();
+        return Response.json({ success: true, configs: machineNodes, agent_token: serverAuth && serverAuth.agent_token || '', proxy: proxyCfg, socks5_outbound: socks5_outbound, realtime_url: env.REALTIME_URL || realtime && realtime.val || '' });
     }
 
     // 🌟 住宅IP代理：优先外部控制器 (PROXY_CTRL_URL)；未配置时回落到本地 D1 实现
@@ -1313,10 +1315,23 @@ rules:
                 } catch(e){}
             }
             else { const u = await db.prepare("SELECT sub_token FROM users WHERE username = ?").bind(currentUser).first(); if(u && u.sub_token) mySubToken = u.sub_token; }
-            return Response.json({ servers, nodes, users, siteTitle, mySubToken });
+            const realtime = await db.prepare("SELECT val FROM sys_config WHERE key = 'realtime_url'").first();
+            return Response.json({ servers, nodes, users, siteTitle, mySubToken, realtimeUrl: env.REALTIME_URL || realtime && realtime.val || '' });
         }
         
-        if (action === "settings" && method === "POST" && isAdmin) { const { site_title } = await request.json(); await db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('site_title', ?, ?)").bind(site_title, Date.now()).run(); return Response.json({ success: true }); }
+        if (action === "settings" && method === "POST" && isAdmin) {
+            const { site_title, realtime_url } = await request.json();
+            const statements = [];
+            if (typeof site_title === 'string' && site_title.trim()) statements.push(db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('site_title', ?, ?)").bind(site_title.trim(), Date.now()));
+            if (typeof realtime_url === 'string') {
+                const normalized = realtime_url.trim().replace(/\/$/, '');
+                if (normalized && !/^https:\/\//i.test(normalized)) return Response.json({ error: 'realtime_url must use https' }, { status: 400 });
+                statements.push(db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('realtime_url', ?, ?)").bind(normalized, Date.now()));
+            }
+            if (!statements.length) return Response.json({ error: 'No supported settings supplied' }, { status: 400 });
+            await db.batch(statements);
+            return Response.json({ success: true });
+        }
         if (action === "user" && params.path[1] === "password" && method === "PUT") { const { password } = await request.json(); if (isAdmin) return Response.json({error: "管理员密码受绝对安全保护，仅可通过 Cloudflare Pages 环境变量修改！"}, {status: 400}); const hash = await sha256(password); await db.prepare("UPDATE users SET password = ? WHERE username = ?").bind(hash, currentUser).run(); return Response.json({ success: true }); }
         if (action === "user" && params.path[1] === "sub_token" && method === "PUT") { const newToken = crypto.randomUUID(); if (isAdmin) await db.prepare("INSERT OR REPLACE INTO sys_config (key, val, ts) VALUES ('admin_sub_token', ?, ?)").bind(newToken, Date.now()).run(); else await db.prepare("UPDATE users SET sub_token = ? WHERE username = ?").bind(newToken, currentUser).run(); return Response.json({ success: true, token: newToken }); }
         if (action === "stats" && method === "GET" && isAdmin) { const query = `SELECT strftime('%m-%d', datetime(timestamp / 1000, 'unixepoch', 'localtime')) as day, SUM(delta_bytes) as total_bytes FROM traffic_stats WHERE ip = ? AND timestamp > ? GROUP BY day ORDER BY day ASC`; const { results } = await db.prepare(query).bind(new URL(request.url).searchParams.get("ip"), Date.now() - 604800000).all(); return Response.json(results || []); }
