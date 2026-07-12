@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64, csv, os, subprocess, threading, time, urllib.request, urllib.parse, json, ipaddress, hashlib, sys, re
+from collections import deque
 from pathlib import Path
 import proxy_server
 
@@ -134,8 +135,12 @@ def check_for_updates():
 
 def get_recent_logs():
     try:
-        res = subprocess.run(["journalctl", "-u", "proxy-lite.service", "-n", "30", "--no-pager", "--output=cat"], capture_output=True, text=True, errors="replace")
-        return res.stdout
+        alpine_log = Path("/var/log/proxy-lite.log")
+        if alpine_log.exists():
+            with alpine_log.open("r", encoding="utf-8", errors="replace") as log_file:
+                return "".join(deque(log_file, maxlen=30))
+        res = subprocess.run(["journalctl", "-u", "proxy-lite.service", "-n", "30", "--no-pager", "--output=cat"], capture_output=True, text=True, errors="replace", timeout=10)
+        return res.stdout or "Waiting for logs..."
     except: return "Waiting for logs..."
 
 def fetch_controller_config():
