@@ -458,11 +458,27 @@ def build_singbox_config(nodes, proxy_cfg=None, peers=None, mesh=None, socks5_ou
         "route": {"rules": []}
     }
     active_certs = []
+    valid_nodes = []
 
     for node in nodes:
-        in_tag, proto, port = f"in-{node['id']}", node["protocol"], int(node["port"])
+        try:
+            in_tag, proto, port = f"in-{node['id']}", node["protocol"], int(node["port"])
+            supported = {"VLESS", "XTLS-Reality", "Reality", "Hysteria2", "TUIC", "Trojan", "H2-Reality", "gRPC-Reality", "AnyTLS", "Naive", "Socks5", "VLESS-Argo", "dokodemo-door"}
+            if proto not in supported:
+                raise ValueError(f"unsupported protocol {proto}")
+            if proto != "dokodemo-door" and not isinstance(node.get("uuid"), str):
+                raise ValueError("uuid is required")
+            if proto in {"XTLS-Reality", "Reality", "H2-Reality", "gRPC-Reality"} and (not node.get("private_key") or not node.get("short_id")):
+                raise ValueError("Reality private_key and short_id are required")
+            if proto in {"TUIC", "Trojan", "AnyTLS", "Naive", "Socks5"} and not node.get("private_key"):
+                raise ValueError(f"{proto} password is required")
+            if proto == "dokodemo-door" and node.get("relay_type") != "internal" and (not node.get("target_ip") or not node.get("target_port")):
+                raise ValueError("dokodemo target_ip and target_port are required")
+        except (KeyError, TypeError, ValueError) as error:
+            print(f"[agent] skipping invalid node {node.get('id', '<unknown>')}: {error}", flush=True)
+            continue
         sni = node.get("sni") or "addons.mozilla.org"
-        clean_uuid = node['uuid'].replace('-', '')
+        clean_uuid = node.get('uuid', '').replace('-', '')
         
         if proto in ["Hysteria2", "TUIC", "Trojan", "VLESS-WS-TLS", "AnyTLS", "Naive"]:
             cert_path, key_path = f"/opt/kui/cert_{node['id']}.pem", f"/opt/kui/key_{node['id']}.pem"
@@ -502,6 +518,7 @@ def build_singbox_config(nodes, proxy_cfg=None, peers=None, mesh=None, socks5_ou
             else:
                 singbox_config["outbounds"].append({ "type": "direct", "tag": out_tag, "override_address": node["target_ip"], "override_port": int(node["target_port"]) })
             singbox_config["route"]["rules"].append({ "inbound": [in_tag], "outbound": out_tag })
+        valid_nodes.append(node)
 
     # --- 住宅IP代理出口 / SOCKS5 服务注入（如端口已被 proxy_server.py 占用则跳过，避免双进程抢端口炸 sing-box）---
     if proxy_cfg:
@@ -554,12 +571,16 @@ def build_singbox_config(nodes, proxy_cfg=None, peers=None, mesh=None, socks5_ou
     except Exception: pass
 
     # --- 住宅IP跨VPS互联（mesh）：把本机节点出口链式转发到其它 VPS 的 SOCKS5，实现出口IP共享/轮换 ---
-    if peers and mesh and mesh.get("enabled"):
+    mesh_enabled = bool(peers and mesh and mesh.get("enabled"))
+    if mesh_enabled and socks5_outbound and socks5_outbound.get("enabled"):
+        print("[agent] server SOCKS5 outbound takes priority; mesh routing skipped", flush=True)
+        mesh_enabled = False
+    if mesh_enabled:
         try:
             chain_mode = mesh.get("mode", "all")
             chain_nodes = set(str(x) for x in (mesh.get("nodes") or []))
             rr = [0]
-            for node in nodes:
+            for node in valid_nodes:
                 if node.get("protocol") == "dokodemo-door":
                     continue
                 nid = str(node["id"])
@@ -645,7 +666,7 @@ def build_singbox_config(nodes, proxy_cfg=None, peers=None, mesh=None, socks5_ou
                     for rule in singbox_config["route"]["rules"]:
                         for ib in rule.get("inbound", []):
                             existing_routed.add(ib)
-                    for node in nodes:
+                    for node in valid_nodes:
                         if node.get("protocol") == "dokodemo-door":
                             continue
                         in_tag = f"in-{node['id']}"
@@ -654,7 +675,7 @@ def build_singbox_config(nodes, proxy_cfg=None, peers=None, mesh=None, socks5_ou
         except Exception:
             pass
 
-    for node in nodes:
+    for node in valid_nodes:
         ensure_firewall_open(node["port"])
     os.makedirs(os.path.dirname(SINGBOX_CONF_PATH), exist_ok=True)
     new_config_str = json.dumps(singbox_config, indent=2)
@@ -829,7 +850,7 @@ def fetch_and_apply_configs():
                 peers = fetch_proxy_mesh(mesh.get("country", "ANY"))
                 exit_ip = mesh.get("exit")
                 if exit_ip and exit_ip != "ANY":
-                    peers = [p for p in peers if p.get("socks_ip") == exit_ip or p.get("ip") == exit_ip]
+                    peers = [p for p in peers if p.get("country") == exit_ip or p.get("socks_ip") == exit_ip or p.get("ip") == exit_ip]
             socks5_outbound = data.get("socks5_outbound", {})
             build_singbox_config(nodes, current_proxy_config, peers, mesh, socks5_outbound)
             return nodes

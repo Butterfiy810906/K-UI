@@ -18,6 +18,20 @@ function yamlString(value) {
     return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
 }
 
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+function isPrivateSubscriptionHost(hostname) {
+    const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+    if (host === '::1' || host === '::' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) return true;
+    const parts = host.split('.');
+    if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part) || Number(part) > 255)) return false;
+    const [a, b] = parts.map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
 function formatIpForLink(ip) {
     if (!ip || typeof ip !== 'string') return ip;
     if (ip.startsWith('[') && ip.endsWith(']')) return ip;
@@ -331,6 +345,10 @@ async function ensureDbSchema(db) {
     try { await db.prepare("SELECT username FROM nodes LIMIT 1").first(); } catch (e) { try { await db.prepare("ALTER TABLE nodes ADD COLUMN username TEXT DEFAULT 'admin'").run(); } catch(e){} }
     try { await db.prepare("SELECT disk FROM servers LIMIT 1").first(); } catch (e) { const newCols = ['disk INTEGER DEFAULT 0', 'load TEXT DEFAULT ""', 'uptime TEXT DEFAULT ""', 'net_in_speed INTEGER DEFAULT 0', 'net_out_speed INTEGER DEFAULT 0', 'tcp_conn INTEGER DEFAULT 0', 'udp_conn INTEGER DEFAULT 0']; for (let col of newCols) { try { await db.prepare(`ALTER TABLE servers ADD COLUMN ${col}`).run(); } catch(err){} } }
     try { await db.prepare("SELECT sub_token FROM users LIMIT 1").first(); } catch (e) { try { await db.prepare("ALTER TABLE users ADD COLUMN sub_token TEXT").run(); } catch(err){} }
+    try {
+        const { results: usersWithoutToken } = await db.prepare("SELECT username FROM users WHERE sub_token IS NULL OR sub_token = '' LIMIT 100").all();
+        if (usersWithoutToken && usersWithoutToken.length) await db.batch(usersWithoutToken.map(user => db.prepare("UPDATE users SET sub_token = ? WHERE username = ? AND (sub_token IS NULL OR sub_token = '')").bind(crypto.randomUUID(), user.username)));
+    } catch (error) {}
     try { await db.prepare("SELECT reset_day FROM probe_servers LIMIT 1").first(); } catch (e) { try { await db.prepare("ALTER TABLE probe_servers ADD COLUMN reset_day TEXT DEFAULT '1'").run(); } catch(e){} }
     try { await db.prepare("SELECT socks5_enable FROM servers LIMIT 1").first(); } catch (e) { const s5Cols = ['socks5_enable INTEGER DEFAULT 0', 'socks5_addr TEXT DEFAULT ""', 'socks5_port INTEGER DEFAULT 0', 'socks5_user TEXT DEFAULT ""', 'socks5_pass TEXT DEFAULT ""']; for (let col of s5Cols) { try { await db.prepare(`ALTER TABLE servers ADD COLUMN ${col}`).run(); } catch(err){} } }
     try { await db.prepare("SELECT socks5_mode FROM servers LIMIT 1").first(); } catch (e) { try { await db.prepare("ALTER TABLE servers ADD COLUMN socks5_mode TEXT DEFAULT 'global'").run(); } catch(err){} try { await db.prepare("ALTER TABLE servers ADD COLUMN socks5_domains TEXT DEFAULT ''").run(); } catch(err){} }
@@ -391,14 +409,14 @@ async function verifyAgent(authHeader, ip, db, env) {
         const server = await db.prepare("SELECT agent_token FROM servers WHERE ip = ?").bind(ip).first();
         if (server && server.agent_token && authHeader === server.agent_token) return true;
         const legacyDeadline = Date.UTC(2026, 7, 1);
-        const legacyEnabled = env.LEGACY_AGENT_AUTH !== 'false' && Date.now() < legacyDeadline;
+        const legacyEnabled = env.LEGACY_AGENT_AUTH === 'true' && Date.now() < legacyDeadline;
         if (server && legacyEnabled && authHeader === await sha256(env.ADMIN_PASSWORD || "admin")) return true;
     }
     return false;
 }
 
 async function isLegacyAgent(authHeader, ip, db, env) {
-    if (!authHeader || !ip || env.LEGACY_AGENT_AUTH === 'false' || Date.now() >= Date.UTC(2026, 7, 1)) return false;
+    if (!authHeader || !ip || env.LEGACY_AGENT_AUTH !== 'true' || Date.now() >= Date.UTC(2026, 7, 1)) return false;
     const server = await db.prepare("SELECT ip FROM servers WHERE ip = ?").bind(ip).first();
     return !!server && authHeader === await sha256(env.ADMIN_PASSWORD || "admin");
 }
@@ -444,7 +462,7 @@ async function handleProbeAPI(request, env, context, pathArray) {
                 }
                 else if (text.startsWith('cb_node_')) {
                     const id = text.split('_')[2]; const s = await db.prepare('SELECT * FROM probe_servers WHERE id = ?').bind(id).first();
-                    if (s) await tgEdit(chatId, msgId, `🖥 <b>探针详情:</b> ${s.name}\n\n系统: ${s.os||'-'}\nIP类型: IPv4:${s.ip_v4} / IPv6:${s.ip_v6}\n运行时长: ${s.uptime}\n分组: ${s.server_group}`, {inline_keyboard: [[{text: '🔙 返回列表', callback_data: 'cb_list_nodes'}]]});
+                    if (s) await tgEdit(chatId, msgId, `🖥 <b>探针详情:</b> ${escapeHtml(s.name)}\n\n系统: ${escapeHtml(s.os||'-')}\nIP类型: IPv4:${escapeHtml(s.ip_v4)} / IPv6:${escapeHtml(s.ip_v6)}\n运行时长: ${escapeHtml(s.uptime)}\n分组: ${escapeHtml(s.server_group)}`, {inline_keyboard: [[{text: '🔙 返回列表', callback_data: 'cb_list_nodes'}]]});
                 }
                 else if (text === 'cb_settings') {
                     let set = { is_public: 'true', show_price: 'true' }; try { const { results } = await db.prepare("SELECT key, value FROM probe_settings").all(); results.forEach(r => set[r.key]=r.value); } catch(e){}
@@ -503,7 +521,9 @@ async function handleProbeAPI(request, env, context, pathArray) {
         return Response.json(server);
     }
 
-    if (!(await verifyAuth(request.headers.get("Authorization"), db, env))) return Response.json({error: "Unauthorized"}, {status: 401});
+    const probeUser = await verifyAuth(request.headers.get("Authorization"), db, env);
+    if (!probeUser) return Response.json({error: "Unauthorized"}, {status: 401});
+    if (subPath.startsWith('admin/') && probeUser !== (env.ADMIN_USERNAME || 'admin')) return Response.json({error: "Forbidden"}, {status: 403});
 
     // 🌟 GitHub 云端拉取三网节点库
     if (method === 'POST' && subPath === 'admin/pull_github') {
@@ -618,16 +638,17 @@ async function proxyLocal(method, subPath, req, env) {
         if (method === 'POST') {
             try {
                 const data = await req.json();
+                const configKey = data.ip ? `proxy_slot_map_${data.ip}` : 'proxy_slot_map';
+                const existingRow = await db.prepare("SELECT value FROM probe_settings WHERE key = ?").bind(configKey).first();
+                let existing = {};
+                try { existing = JSON.parse(existingRow && existingRow.value || '{}'); } catch (error) {}
                 const rawCountry = (data["0"] || data.country || "JP").toString().toUpperCase().trim();
-                const sanitized = { "0": rawCountry, "country": rawCountry, "port": parseInt(data.port) || 7920 };
+                const sanitized = { ...existing, "0": rawCountry, "country": rawCountry, "port": parseInt(data.port) || 7920 };
                 if (data.enabled !== undefined) sanitized.enabled = !!data.enabled;
                 if (data.mesh && typeof data.mesh === 'object') sanitized.mesh = data.mesh;
                 if (data.switch_trigger) sanitized.switch_trigger = data.switch_trigger;
-                console.log('[proxy-config-save] writing to probe_settings:', JSON.stringify(sanitized));
-                const configKey = data.ip ? `proxy_slot_map_${data.ip}` : 'proxy_slot_map';
                 await db.prepare("INSERT INTO probe_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(configKey, JSON.stringify(sanitized)).run();
                 const proxyCfg = { enabled: true, port: sanitized.port, user: proxyUser, pass: proxyPass, country: rawCountry };
-                console.log('[proxy-config-save] success, returning:', JSON.stringify({ slot_map: sanitized }));
                 return new Response(JSON.stringify({ success: true, slot_map: sanitized, proxy: proxyCfg }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store, must-revalidate' } });
             } catch (e) { console.error('[proxy-config-save] FAILED:', e.message); return new Response(JSON.stringify({ success: false, error: "CONFIG_WRITE_ERR: " + e.message }), { status: 500, headers: { 'Content-Type': 'application/json' } }); }
         }
@@ -710,7 +731,9 @@ async function proxyLocal(method, subPath, req, env) {
     }
 
     if (subPath.startsWith('testisp-lookup/') && method === 'GET') {
-        const targetIp = subPath.replace('testisp-lookup/', '');
+        let targetIp;
+        try { targetIp = decodeURIComponent(subPath.replace('testisp-lookup/', '')); }
+        catch (error) { return new Response(JSON.stringify({ error: 'Invalid IP' }), { status: 400, headers: { 'Content-Type': 'application/json' } }); }
         if (!/^[0-9a-fA-F:.]+$/.test(targetIp)) return new Response(JSON.stringify({ error: 'Invalid IP' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
         try {
             const resp = await fetch(`https://testisp.info/api/check?ip=${encodeURIComponent(targetIp)}`, {
@@ -985,6 +1008,7 @@ export async function onRequest(context) {
 
     // 🌟 核心拦截并拆分普通订阅与 Clash 订阅生成
     if (action === "sub" && method === "GET") {
+        await ensureDbSchema(db);
         const urlObj = new URL(request.url); 
         const ip = urlObj.searchParams.get("ip"); 
         const reqUser = urlObj.searchParams.get("user"); 
@@ -1000,7 +1024,7 @@ export async function onRequest(context) {
         } 
         else { 
             const u = await db.prepare("SELECT password, sub_token FROM users WHERE username = ?").bind(reqUser).first(); 
-            if (u) isValid = (token === u.sub_token) || (!u.sub_token && token === u.password); 
+            if (u) isValid = !!u.sub_token && token === u.sub_token;
         }
         
         if (!isValid) return new Response("Forbidden", { status: 403 });
@@ -1196,7 +1220,7 @@ export async function onRequest(context) {
         // --- 若为 Clash 格式，渲染 YAML 返回 ---
         if (format === 'clash') {
             const proxyGroupList = proxyNames.length > 0 ? proxyNames.map(n => `      - ${n}`).join('\n') : '      - DIRECT';
-            const hasIPv6 = results.some(n => /:/.test(n.vps_ip)) || clashProxies.some(p => /server: \[.*\]/.test(p));
+            const hasIPv6 = results.some(n => /:/.test(n.vps_ip)) || clashProxies.some(p => /server:\s*["']?\[/.test(p));
             const clashYaml = `port: 7890
 socks-port: 7891
 allow-lan: true
@@ -1280,8 +1304,8 @@ rules:
         if (action === "stats" && method === "GET" && isAdmin) { const query = `SELECT strftime('%m-%d', datetime(timestamp / 1000, 'unixepoch', 'localtime')) as day, SUM(delta_bytes) as total_bytes FROM traffic_stats WHERE ip = ? AND timestamp > ? GROUP BY day ORDER BY day ASC`; const { results } = await db.prepare(query).bind(new URL(request.url).searchParams.get("ip"), Date.now() - 604800000).all(); return Response.json(results || []); }
         
         if (action === "users" && isAdmin) {
-            if (method === "POST") { const { username, password, traffic_limit, expire_time } = await request.json(); const hash = await sha256(password); const subToken = crypto.randomUUID(); await db.prepare("INSERT INTO users (username, password, traffic_limit, expire_time, sub_token) VALUES (?, ?, ?, ?, ?)").bind(username, hash, traffic_limit, expire_time, subToken).run(); return Response.json({ success: true }); }
-            if (method === "PUT") { const { username, enable, reset_traffic } = await request.json(); if (reset_traffic) await db.prepare("UPDATE users SET traffic_used = 0 WHERE username = ?").bind(username).run(); else if (enable !== undefined) await db.prepare("UPDATE users SET enable = ? WHERE username = ?").bind(enable, username).run(); return Response.json({ success: true }); }
+            if (method === "POST") { const { username, password, traffic_limit, expire_time } = await request.json(); if (await db.prepare("SELECT username FROM users WHERE username = ?").bind(username).first()) return Response.json({ error: "User already exists" }, { status: 409 }); const hash = await sha256(password); const subToken = crypto.randomUUID(); await db.prepare("INSERT INTO users (username, password, traffic_limit, expire_time, sub_token) VALUES (?, ?, ?, ?, ?)").bind(username, hash, traffic_limit, expire_time, subToken).run(); return Response.json({ success: true }); }
+            if (method === "PUT") { const { username, enable, reset_traffic } = await request.json(); const statements = []; if (reset_traffic) statements.push(db.prepare("UPDATE users SET traffic_used = 0 WHERE username = ?").bind(username)); if (enable !== undefined) statements.push(db.prepare("UPDATE users SET enable = ? WHERE username = ?").bind(enable, username)); if (statements.length) await db.batch(statements); return Response.json({ success: true }); }
             if (method === "DELETE") { const target = new URL(request.url).searchParams.get("username"); await db.prepare("DELETE FROM users WHERE username = ?").bind(target).run(); await db.prepare("UPDATE nodes SET username = ? WHERE username = ?").bind(currentUser, target).run(); return Response.json({ success: true }); }
         }
         
@@ -1296,8 +1320,8 @@ rules:
         }
 
         if (action === "nodes" && isAdmin) {
-            if (method === "POST") { const n = await request.json(); let nodeUser = n.username || currentUser; if (nodeUser === 'admin') nodeUser = currentUser; await db.prepare(`INSERT INTO nodes (id, uuid, vps_ip, protocol, port, sni, private_key, public_key, short_id, relay_type, target_ip, target_port, target_id, enable, traffic_used, traffic_limit, expire_time, username) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(n.id, n.uuid, n.vps_ip, n.protocol, n.port, n.sni||null, n.private_key||null, n.public_key||null, n.short_id||null, n.relay_type||null, n.target_ip||null, n.target_port||null, n.target_id||null, 1, 0, n.traffic_limit||0, n.expire_time||0, nodeUser).run(); return Response.json({ success: true }); }
-            if (method === "PUT") { const { id, enable, reset_traffic } = await request.json(); if (reset_traffic) await db.prepare("UPDATE nodes SET traffic_used = 0 WHERE id = ?").bind(id).run(); else if (enable !== undefined) await db.prepare("UPDATE nodes SET enable = ? WHERE id = ?").bind(enable, id).run(); return Response.json({ success: true }); }
+            if (method === "POST") { const n = await request.json(); if (await db.prepare("SELECT id FROM nodes WHERE id = ?").bind(n.id).first()) return Response.json({ error: "Node already exists" }, { status: 409 }); let nodeUser = n.username || currentUser; if (nodeUser === 'admin') nodeUser = currentUser; await db.prepare(`INSERT INTO nodes (id, uuid, vps_ip, protocol, port, sni, private_key, public_key, short_id, relay_type, target_ip, target_port, target_id, enable, traffic_used, traffic_limit, expire_time, username) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(n.id, n.uuid, n.vps_ip, n.protocol, n.port, n.sni||null, n.private_key||null, n.public_key||null, n.short_id||null, n.relay_type||null, n.target_ip||null, n.target_port||null, n.target_id||null, 1, 0, n.traffic_limit||0, n.expire_time||0, nodeUser).run(); return Response.json({ success: true }); }
+            if (method === "PUT") { const { id, enable, reset_traffic } = await request.json(); const statements = []; if (reset_traffic) statements.push(db.prepare("UPDATE nodes SET traffic_used = 0 WHERE id = ?").bind(id)); if (enable !== undefined) statements.push(db.prepare("UPDATE nodes SET enable = ? WHERE id = ?").bind(enable, id)); if (statements.length) await db.batch(statements); return Response.json({ success: true }); }
             if (method === "DELETE") { await db.prepare("DELETE FROM nodes WHERE id = ?").bind(new URL(request.url).searchParams.get("id")).run(); return Response.json({ success: true }); }
         }
 
@@ -1309,6 +1333,7 @@ rules:
                 let subscriptionUrl;
                 try { subscriptionUrl = new URL(url); } catch (error) { return Response.json({ error: "订阅链接格式无效" }, { status: 400 }); }
                 if (!['http:', 'https:'].includes(subscriptionUrl.protocol)) return Response.json({ error: "仅支持 HTTP/HTTPS 订阅" }, { status: 400 });
+                if (isPrivateSubscriptionHost(subscriptionUrl.hostname)) return Response.json({ error: "禁止访问本机或私有网络地址" }, { status: 400 });
                 const id = crypto.randomUUID();
                 const now = Date.now();
                 await db.prepare("INSERT INTO third_party_subscriptions (id, name, url, added_at, last_fetched_at) VALUES (?, ?, ?, ?, ?)" ).bind(id, name || '第三方订阅', url, now, now).run();

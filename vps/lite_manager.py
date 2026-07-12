@@ -125,7 +125,8 @@ def check_for_updates():
         for temporary, target in staged:
             os.replace(temporary, target)
         print("[update] residential proxy components updated; restarting", flush=True)
-        subprocess.run(["pkill", "-f", "openvpn.*tun_main|tun_backup"], capture_output=True)
+        subprocess.run(["pkill", "-f", "openvpn.*tun_main"], capture_output=True)
+        subprocess.run(["pkill", "-f", "openvpn.*tun_backup"], capture_output=True)
         os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
     except Exception as error:
         print(f"[update] update check failed: {error}", flush=True)
@@ -591,7 +592,8 @@ def main():
     check_for_updates()
     get_public_ip()
     setup_env()
-    subprocess.run(["pkill", "-f", "openvpn.*tun_main|tun_backup"], capture_output=True)
+    subprocess.run(["pkill", "-f", "openvpn.*tun_main"], capture_output=True)
+    subprocess.run(["pkill", "-f", "openvpn.*tun_backup"], capture_output=True)
     
     proxy_server.ACTIVE_BIND = tun_main.name
     

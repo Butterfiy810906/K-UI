@@ -17,10 +17,10 @@ VPS_IP=""
 
 while [ "$#" -gt 0 ]; do
     case $1 in
-        --domain) DOMAIN="$2"; shift 2 ;;
-        --controller) CONTROLLER="$2"; shift 2 ;;
-        --token) AGENT_TOKEN="$2"; shift 2 ;;
-        --ip) VPS_IP="$2"; shift 2 ;;
+        --domain) [ "$#" -ge 2 ] || { echo "❌ --domain 缺少参数"; exit 1; }; DOMAIN="$2"; shift 2 ;;
+        --controller) [ "$#" -ge 2 ] || { echo "❌ --controller 缺少参数"; exit 1; }; CONTROLLER="$2"; shift 2 ;;
+        --token) [ "$#" -ge 2 ] || { echo "❌ --token 缺少参数"; exit 1; }; AGENT_TOKEN="$2"; shift 2 ;;
+        --ip) [ "$#" -ge 2 ] || { echo "❌ --ip 缺少参数"; exit 1; }; VPS_IP="$2"; shift 2 ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
@@ -40,9 +40,9 @@ if [ -z "$VPS_IP" ]; then
     echo "❌ 错误: 缺少 --ip (面板登记的服务器 IP)"
     exit 1
 fi
+if ! printf '%s' "$AGENT_TOKEN" | grep -Eq '^[A-Za-z0-9._:-]+$'; then echo "❌ Agent Token 包含非法字符"; exit 1; fi
 if ! printf '%s\n%s\n' "$DOMAIN" "$CONTROLLER" | grep -Eq '^https?://[A-Za-z0-9._:/-]+$'; then echo "❌ 域名参数格式无效"; exit 1; fi
 if ! printf '%s' "$VPS_IP" | grep -Eq '^[0-9A-Fa-f:.]+$'; then echo "❌ VPS IP 格式无效"; exit 1; fi
-if ! printf '%s' "$AGENT_TOKEN" | grep -Eq '^[A-Za-z0-9._:-]+$'; then echo "❌ Agent Token 包含非法字符"; exit 1; fi
 
 export C2_URL="$CONTROLLER"
 export WEB_USER="${WEB_USER:-admin}"
@@ -309,7 +309,8 @@ main() {
         rc-service sing-box stop 2>/dev/null || true
     fi
     pkill -f "python3 -u lite_manager.py" >/dev/null 2>&1 || true
-    pkill -f "openvpn.*tun_main|tun_backup" >/dev/null 2>&1 || true
+    pkill -f "openvpn.*tun_main" >/dev/null 2>&1 || true
+    pkill -f "openvpn.*tun_backup" >/dev/null 2>&1 || true
     rm -f /opt/proxy_lite/lite_manager.py /opt/proxy_lite/proxy_server.py /opt/proxy_lite/run.sh
 
     install_dependencies

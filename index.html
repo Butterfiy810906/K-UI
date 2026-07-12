@@ -992,7 +992,7 @@
                 
                 const showWelcomePopup = ref(false);
 
-                watch(activeTab, (val) => { localStorage.setItem('monitor_preferred_tab', val); if (val === 'proxy' && isLoggedIn.value) { loadProxyPool(); setTimeout(pcInitProxy, 0); } else { pcStopProxy(); } if (val === 'thirdparty') loadThirdPartySubscriptions(); });
+                watch(activeTab, (val) => { localStorage.setItem('monitor_preferred_tab', val); if (val === 'proxy' && isLoggedIn.value) { loadProxyPool(); setTimeout(pcInitProxy, 0); } else { pcStopProxy(); } if (val === 'thirdparty') loadThirdPartySubscriptions(); if (val === 'probe') { updateCustomStyles(); updateCustomScript(probeSys.custom_script); } else { document.body.className = ''; document.getElementById('kui-custom-styles')?.remove(); document.getElementById('kui-custom-head')?.remove(); updateCustomScript(''); } });
                 watch(probeView, (val) => localStorage.setItem('monitor_preferred_view', val));
 
                 const hasCustomCssFlag = computed(() => {
@@ -1012,6 +1012,7 @@
                 };
 
                 const updateCustomStyles = () => {
+                    if (isLoggedIn.value && activeTab.value !== 'probe') return;
                     document.body.className = probeSys.theme || 'theme1';
 
                     let styleTag = document.getElementById('kui-custom-styles');
@@ -1028,21 +1029,24 @@
                     if (probeSys.custom_bg) css += `body { background: url('${probeSys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; } .probe-vps-card, .probe-global-stats, .probe-header-card, .probe-chart-card, .probe-custom-table, .probe-filter-tag, .probe-view-controls { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; } .probe-vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); } .probe-group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; } .probe-g-val, .probe-card-title { color: #000 !important; font-weight: 800 !important; } .probe-g-label, .probe-g-sub, .probe-card-meta { color: #333 !important; font-weight: 600 !important; } .probe-stat-bar-full { background: rgba(0,0,0,0.1) !important; }`;
                     styleTag.innerHTML = css;
 
+                    let headWrapper = document.getElementById('kui-custom-head');
                     if (probeSys.custom_head) {
-                        let headWrapper = document.getElementById('kui-custom-head');
                         if (!headWrapper) { headWrapper = document.createElement('div'); headWrapper.id = 'kui-custom-head'; document.head.appendChild(headWrapper); }
                         headWrapper.innerHTML = probeSys.custom_head;
-                    }
+                    } else if (headWrapper) headWrapper.remove();
                 };
 
                 const updateCustomScript = (newVal) => {
+                    document.querySelectorAll('[data-kui-custom-script]').forEach(node => node.remove());
                     let wrapper = document.getElementById('kui-custom-html-wrapper');
                     if (wrapper) wrapper.remove();
+                    if (isLoggedIn.value && activeTab.value !== 'probe') return;
                     if (!newVal) return;
                     wrapper = document.createElement('div'); wrapper.id = 'kui-custom-html-wrapper'; wrapper.innerHTML = newVal; 
                     const scripts = wrapper.getElementsByTagName('script');
                     for (let i = 0; i < scripts.length; i++) {
                         const newScript = document.createElement('script');
+                        newScript.dataset.kuiCustomScript = 'true';
                         if (scripts[i].src) newScript.src = scripts[i].src; else newScript.textContent = scripts[i].textContent;
                         document.body.appendChild(newScript);
                     }
@@ -1219,7 +1223,7 @@
                             Object.assign(probeSys, data.settings); 
                             if (data.settings.cached_nodes_data) parseCachedNodes(data.settings.cached_nodes_data);
                             publicProbeServers.value = data.servers || []; updateCustomStyles();
-                            if (probeSys.custom_script && !document.getElementById('kui-custom-html-wrapper')) updateCustomScript(probeSys.custom_script);
+                            if ((!isLoggedIn.value || activeTab.value === 'probe') && probeSys.custom_script && !document.getElementById('kui-custom-html-wrapper')) updateCustomScript(probeSys.custom_script);
                             if (probeView.value === 'map') drawMarkers();
                             if (probeSys.is_public !== 'true' && !isLoggedIn.value) showLoginModal.value = true;
                             
@@ -1514,7 +1518,7 @@
         async function getPcAuthHeader() {
             const user = localStorage.getItem('kui_user') || 'admin';
             const key = localStorage.getItem('kui_auth_key') || '';
-            if (!key) return 'admin';
+            if (!key) return '';
             const ts = Date.now();
             const sig = await generateHMAC(key, user + ts);
             return `${btoa(user)}.${ts}.${sig}`;
@@ -1592,7 +1596,7 @@
 
             try {
                 const authHeaders = window.kuiAdminAuthHeader ? await window.kuiAdminAuthHeader() : {};
-                const res = await fetch('/api/proxy/testisp-lookup/' + encodeURIComponent(ip), { headers: authHeaders });
+                const res = await fetch('/api/proxy/testisp-lookup/' + ip, { headers: authHeaders });
                 const rawText = await res.text();
 
                 let d;
@@ -1609,7 +1613,7 @@
                 }
 
                 const isHosting = d.isp.flag === 'hosting';
-                const threat = d.risk.threat_listed;
+                const threat = !!(d.risk?.threat_listed ?? d.isp?.risk?.threat_listed);
                 const isNative = d.geo.is_native;
 
                 const tags = isHosting

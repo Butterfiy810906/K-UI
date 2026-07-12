@@ -100,15 +100,23 @@ def create_connection(address: tuple[str, int], timeout: float = 20) -> socket.s
     raise err or OSError("getaddrinfo empty")
 
 def relay(left: socket.socket, right: socket.socket) -> None:
-    sockets = [left, right]
-    while True:
-        readable, _, errored = select.select(sockets, [], sockets, 120)
-        if errored: return
-        for source in readable:
-            target = right if source is left else left
-            data = source.recv(65536)
-            if not data: return
-            target.sendall(data)
+    def pump(source: socket.socket, target: socket.socket) -> None:
+        try:
+            while True:
+                data = source.recv(65536)
+                if not data:
+                    break
+                target.sendall(data)
+        except OSError:
+            pass
+        finally:
+            try: target.shutdown(socket.SHUT_WR)
+            except OSError: pass
+
+    upload = threading.Thread(target=pump, args=(left, right), daemon=True)
+    upload.start()
+    pump(right, left)
+    upload.join(timeout=5)
 
 def socks5_client(client: socket.socket, first_byte: bytes) -> None:
     if not PROXY_USER or not PROXY_PASS:
@@ -223,33 +231,38 @@ def start_proxy_server(host: str, port: int) -> None:
     servers = []
     retry_delay = 1
     attempts = 0
-    while not servers and attempts < 10:
+    while attempts < 5:
         attempts += 1
-        try:
-            server6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            server6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-            server6.bind(("::", port))
-            server6.listen(256)
-            servers.append(server6)
-        except Exception as error:
-            print(f"[proxy] IPv6 bind failed on {port}: {error}", flush=True)
-
         try:
             server4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server4.bind(("0.0.0.0", port))
             server4.listen(256)
             servers.append(server4)
+            break
         except Exception as error:
             print(f"[proxy] IPv4 bind failed on {port}: {error}", flush=True)
-
-        if not servers:
+            try: server4.close()
+            except Exception: pass
             print(f"[proxy] retrying bind in {retry_delay}s", flush=True)
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 30)
     if not servers:
-        raise OSError(f"unable to bind proxy port {port} after {attempts} attempts")
+        print(f"[proxy] IPv4 unavailable after {attempts} attempts; trying IPv6-only mode", flush=True)
+
+    try:
+        server6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        server6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        server6.bind(("::", port))
+        server6.listen(256)
+        servers.append(server6)
+    except Exception as error:
+        print(f"[proxy] IPv6 listener unavailable on {port}: {error}", flush=True)
+        try: server6.close()
+        except Exception: pass
+    if not servers:
+        raise OSError(f"unable to bind proxy port {port} on IPv4 or IPv6")
     while True:
         try:
             readable, _, _ = select.select(servers, [], [], 1.0)

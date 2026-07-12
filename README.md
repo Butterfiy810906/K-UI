@@ -184,9 +184,9 @@ openssl rand -base64 32
 
 | 变量名 | 说明 | 默认行为 |
 |---|---|---|
-| `LEGACY_AGENT_AUTH` | 设置为精确字符串 `false` 可关闭旧管理员哈希 Agent 兼容 | 临时兼容至 2026-08-01 UTC |
+| `LEGACY_AGENT_AUTH` | 仅在迁移历史 Agent 时临时设置为精确字符串 `true` | 默认关闭，最迟 2026-08-01 UTC 失效 |
 
-新部署无需设置此变量。历史 VPS 全部重新执行 Full Deploy Command 后，建议立即设置 `LEGACY_AGENT_AUTH=false` 并重新部署 Pages。
+新部署不要设置此变量。只有历史 Agent 已离线且无法立即执行 Full Deploy Command 时，才临时设置 `LEGACY_AGENT_AUTH=true` 并重新部署 Pages；迁移完成后立即删除该变量或设置为 `false`。
 
 #### 住宅控制器无需配置
 
