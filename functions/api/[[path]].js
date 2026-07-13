@@ -1316,6 +1316,13 @@ rules:
         return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    if (action === "realtime_auth" && method === "POST") {
+        await ensureDbSchema(db);
+        const username = await verifyAuth(request.headers.get("Authorization"), db, env);
+        const isAdminUser = username === (env.ADMIN_USERNAME || "admin");
+        return Response.json({ success: isAdminUser, admin: isAdminUser }, { status: isAdminUser ? 200 : 403, headers: { "Cache-Control": "no-store" } });
+    }
+
     const currentUser = await verifyAuth(request.headers.get("Authorization"), db, env);
     const isAdmin = currentUser === (env.ADMIN_USERNAME || "admin");
     if (!currentUser) return Response.json({ error: "Unauthorized" }, { status: 401 });

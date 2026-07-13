@@ -152,8 +152,6 @@ https://你的项目.pages.dev
 
 | 名称 | 填写内容 |
 |---|---|
-| `ADMIN_USERNAME` | 必须与 Pages 一样 |
-| `ADMIN_PASSWORD` | 必须与 Pages 一样，使用 Secret |
 | `PAGES_ORIGIN` | Pages 地址，例如 `https://你的项目.pages.dev` |
 
 `PAGES_ORIGIN` 末尾不要添加 `/`。
@@ -289,9 +287,8 @@ Binding name 必须为 DB
 检查四项：
 
 1. Worker 和 Pages 是否使用同一个 D1 ID。
-2. Worker 和 Pages 的管理员用户名是否相同。
-3. Worker 和 Pages 的管理员密码是否相同。
-4. `PAGES_ORIGIN` 是否与浏览器打开的 Pages 地址完全相同。
+2. `PAGES_ORIGIN` 是否与浏览器打开的 Pages 地址完全相同。
+3. Pages 当前管理员账号是否可以正常登录。
 
 ## Agent 返回 401 或 403
 
@@ -339,7 +336,6 @@ npm install
 
 编辑 `wrangler.jsonc`：
 
-- `ADMIN_USERNAME`。
 - `PAGES_ORIGIN`。
 - 如果使用已有 D1，填写真实 `database_name` 和 `database_id`。
 
@@ -348,7 +344,6 @@ npm install
 ```bash
 npx wrangler login
 npx wrangler deploy
-npx wrangler secret put ADMIN_PASSWORD
 ```
 
 <details>

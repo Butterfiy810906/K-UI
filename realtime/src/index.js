@@ -1,7 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 
-const encoder = new TextEncoder();
-
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -21,19 +19,6 @@ function cors(request, env) {
   };
 }
 
-async function sha256(text) {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(text));
-  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function hmac(keyHex, text) {
-  if (!/^[0-9a-f]{64}$/i.test(keyHex || "")) return "";
-  const bytes = new Uint8Array(keyHex.match(/.{2}/g).map(value => parseInt(value, 16)));
-  const key = await crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(text));
-  return Array.from(new Uint8Array(signature), byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
 function sanitizeSnapshot(snapshot) {
   if (!snapshot?.ip || !snapshot.core) return null;
   const core = snapshot.core;
@@ -50,28 +35,18 @@ function sanitizeSnapshot(snapshot) {
   };
 }
 
-async function verifyUser(header, env) {
+async function verifyAdmin(header, env) {
   try {
-    const parts = String(header || "").split(".");
-    if (parts.length !== 3) return null;
-    const [encodedUser, timestamp, signature] = parts;
-    const numericTimestamp = Number(timestamp);
-    if (!Number.isFinite(numericTimestamp) || Math.abs(Date.now() - numericTimestamp) > 300000) return null;
-    const username = atob(encodedUser);
-    const admin = env.ADMIN_USERNAME || "admin";
-    let keyHex;
-    if (username === admin) {
-      if (!env.ADMIN_PASSWORD) return null;
-      keyHex = await sha256(env.ADMIN_PASSWORD);
-    }
-    else {
-      const user = await env.DB.prepare("SELECT password FROM users WHERE username = ? AND enable = 1").bind(username).first();
-      if (!user) return null;
-      keyHex = user.password;
-    }
-    return (await hmac(keyHex, username + timestamp)) === signature ? username : null;
+    if (!header || !env.PAGES_ORIGIN) return false;
+    const response = await fetch(`${env.PAGES_ORIGIN.replace(/\/$/, "")}/api/realtime_auth`, {
+      method: "POST",
+      headers: { Authorization: header, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) return false;
+    return (await response.json()).admin === true;
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -104,10 +79,9 @@ export default {
     }
 
     if (url.pathname === "/dashboard/ticket" && request.method === "POST") {
-      const username = await verifyUser(request.headers.get("Authorization"), env);
-      if (username !== (env.ADMIN_USERNAME || "admin")) return json({ error: "Forbidden" }, 403, cors(request, env));
+      if (!(await verifyAdmin(request.headers.get("Authorization"), env))) return json({ error: "Forbidden" }, 403, cors(request, env));
       const hub = env.DASHBOARD_HUB.get(env.DASHBOARD_HUB.idFromName("main"));
-      const response = await hub.fetch(new Request("https://hub.internal/ticket", { method: "POST", headers: { "X-KUI-USER": username } }));
+      const response = await hub.fetch(new Request("https://hub.internal/ticket", { method: "POST", headers: { "X-KUI-USER": "admin" } }));
       return new Response(response.body, { status: response.status, headers: { ...Object.fromEntries(response.headers), ...cors(request, env) } });
     }
 
@@ -128,15 +102,14 @@ export default {
     }
 
     if (url.pathname === "/dashboard/snapshot") {
-      if ((await verifyUser(request.headers.get("Authorization"), env)) !== (env.ADMIN_USERNAME || "admin")) return json({ error: "Forbidden" }, 403, cors(request, env));
+      if (!(await verifyAdmin(request.headers.get("Authorization"), env))) return json({ error: "Forbidden" }, 403, cors(request, env));
       const hub = env.DASHBOARD_HUB.get(env.DASHBOARD_HUB.idFromName("main"));
       const response = await hub.fetch(new Request("https://hub.internal/snapshot"));
       return new Response(response.body, { status: response.status, headers: { ...Object.fromEntries(response.headers), ...cors(request, env) } });
     }
 
     if (url.pathname === "/notify" && request.method === "POST") {
-      const username = await verifyUser(request.headers.get("Authorization"), env);
-      if (username !== (env.ADMIN_USERNAME || "admin")) return json({ error: "Forbidden" }, 403, cors(request, env));
+      if (!(await verifyAdmin(request.headers.get("Authorization"), env))) return json({ error: "Forbidden" }, 403, cors(request, env));
       const body = await request.json().catch(() => ({}));
       const ips = body.ip ? [body.ip] : (await env.DB.prepare("SELECT ip FROM servers").all()).results.map(row => row.ip);
       await Promise.all(ips.slice(0, 100).map(ip => {
@@ -147,8 +120,7 @@ export default {
     }
 
     if (url.pathname === "/public-policy" && request.method === "POST") {
-      const username = await verifyUser(request.headers.get("Authorization"), env);
-      if (username !== (env.ADMIN_USERNAME || "admin")) return json({ error: "Forbidden" }, 403, cors(request, env));
+      if (!(await verifyAdmin(request.headers.get("Authorization"), env))) return json({ error: "Forbidden" }, 403, cors(request, env));
       const body = await request.json().catch(() => ({}));
       const hub = env.DASHBOARD_HUB.get(env.DASHBOARD_HUB.idFromName("main"));
       const response = await hub.fetch(new Request("https://hub.internal/public-policy", { method: "POST", headers: { "X-KUI-Public": body.public === true ? "1" : "0" } }));
@@ -382,6 +354,7 @@ export class DashboardHub extends DurableObject {
       server.serializeAttachment({ public: true, connected_at: Date.now() });
       this.ctx.acceptWebSocket(server, ["public"]);
       await this.setDashboardActivity(true);
+      await this.ctx.storage.setAlarm(Date.now() + 60000);
       server.send(JSON.stringify({ type: "snapshot", data: (await this.snapshot()).map(sanitizeSnapshot).filter(Boolean), ts: Date.now() }));
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -496,6 +469,18 @@ export class DashboardHub extends DurableObject {
       else if (!next || value.expires < next) next = value.expires;
     }
     if (expired.length) await this.ctx.storage.delete(expired);
+    const publicSockets = this.ctx.getWebSockets("public");
+    if (publicSockets.length) {
+      const setting = await this.env.DB.prepare("SELECT value FROM probe_settings WHERE key = 'is_public'").first();
+      if (setting && setting.value !== "true") {
+        for (const ws of publicSockets) {
+          try { ws.close(1008, "private dashboard"); } catch {}
+        }
+      } else {
+        const publicCheck = Date.now() + 60000;
+        if (!next || publicCheck < next) next = publicCheck;
+      }
+    }
     if (next) await this.ctx.storage.setAlarm(next + 5000);
   }
 }
