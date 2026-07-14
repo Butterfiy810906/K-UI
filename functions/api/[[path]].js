@@ -1252,7 +1252,9 @@ export async function onRequest(context) {
         await ensureDbSchema(db);
         const subscriptionProtection = await db.prepare("SELECT value FROM probe_settings WHERE key = 'subscription_protection'").first();
         if (subscriptionProtection?.value === 'true') {
-            return new Response("链接无效", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+            // Match an ordinary missing API route. Do not reveal whether the
+            // subscription exists or whether protection is enabled.
+            return json({ error: "Not found" }, 404);
         }
         const urlObj = new URL(request.url); 
         const ip = urlObj.searchParams.get("ip"); 
@@ -1272,7 +1274,9 @@ export async function onRequest(context) {
             if (u) isValid = !!u.sub_token && token === u.sub_token;
         }
         
-        if (!isValid) return new Response("Forbidden", { status: 403 });
+        // Invalid and protected subscription URLs deliberately look identical
+        // to absent endpoints, preventing token validity probing.
+        if (!isValid) return json({ error: "Not found" }, 404);
         
         const now = Date.now(); 
         let query; 
