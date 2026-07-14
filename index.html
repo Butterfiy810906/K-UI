@@ -796,12 +796,12 @@
                             <label class="block text-xs font-bold text-slate-400 mb-2 pl-2">管理员订阅防泄漏重置</label>
                             <div class="flex flex-wrap items-center gap-3">
                                 <button @click="resetMySubLink" class="bg-rose-50 text-rose-600 border border-rose-100 px-6 py-3 rounded-2xl font-bold hover:bg-rose-100 transition-all shadow-sm">⚠️ 一键重置我的订阅令牌</button>
-                                <label class="flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold cursor-pointer transition-colors" :class="probeSys.subscription_protection === 'true' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-200 bg-white/60 text-slate-600'">
+                                <label class="flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold cursor-pointer transition-colors" :class="probeSys.subscription_protection === 'true' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-rose-200 bg-rose-50 text-rose-600'">
                                     <input type="checkbox" v-model="probeSys.subscription_protection" @change="saveSubscriptionProtection" true-value="true" false-value="false" class="w-4 h-4">
                                     订阅保护{{ probeSys.subscription_protection === 'true' ? '已开启' : '已关闭' }}
                                 </label>
+                                <span class="text-[10px] font-medium text-rose-600">（开启后订阅请求返回普通首页内容并停止在线更新；切换开关立即生效）</span>
                             </div>
-                            <p class="text-[10px] font-medium text-slate-500">开启后订阅请求返回普通首页内容并停止在线更新；切换开关立即生效。</p>
                         </div>
                     </div>
 
