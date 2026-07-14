@@ -788,11 +788,11 @@
                             <div class="flex flex-wrap items-center gap-3">
                                 <button @click="resetMySubLink" class="bg-rose-50 text-rose-600 border border-rose-100 px-6 py-3 rounded-2xl font-bold hover:bg-rose-100 transition-all shadow-sm">⚠️ 一键重置我的订阅令牌</button>
                                 <label class="flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold cursor-pointer transition-colors" :class="probeSys.subscription_protection === 'true' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-200 bg-white/60 text-slate-600'">
-                                    <input type="checkbox" v-model="probeSys.subscription_protection" true-value="true" false-value="false" class="w-4 h-4">
+                                    <input type="checkbox" v-model="probeSys.subscription_protection" @change="saveSubscriptionProtection" true-value="true" false-value="false" class="w-4 h-4">
                                     订阅保护{{ probeSys.subscription_protection === 'true' ? '已开启' : '已关闭' }}
                                 </label>
                             </div>
-                            <p class="text-[10px] font-medium text-slate-500">开启后订阅请求返回普通首页内容，停止在线更新；修改后点击下方“立即生效配置”保存。</p>
+                            <p class="text-[10px] font-medium text-slate-500">开启后订阅请求返回普通首页内容并停止在线更新；切换开关立即生效。</p>
                         </div>
                     </div>
 
@@ -1468,6 +1468,15 @@
                 };
 
                 const saveProbeSettings = async () => { await fetchApi('/api/probe/admin/settings', { method: 'POST', body: JSON.stringify({settings: probeSys}) }); if (realtimeUrl.value) { try { const headers = await window.kuiAdminAuthHeader(); await fetch(`${realtimeUrl.value}/public-policy`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ public: probeSys.is_public === 'true' }) }); } catch(e) {} } alert('✅ 探针大盘配置已生效！如果配置了TG参数已自动绑定Webhook。'); refreshData(); fetchProbeData(); };
+                const saveSubscriptionProtection = async () => {
+                    const value = probeSys.subscription_protection;
+                    try {
+                        await fetchApi('/api/probe/admin/settings', { method: 'POST', body: JSON.stringify({ settings: { subscription_protection: value } }) });
+                    } catch (error) {
+                        probeSys.subscription_protection = value === 'true' ? 'false' : 'true';
+                        alert('订阅保护设置保存失败，请重试。');
+                    }
+                };
                 const openProbeEditModal = (s) => { editingProbeNode.value = JSON.parse(JSON.stringify(s)); if(!editingProbeNode.value.is_hidden) editingProbeNode.value.is_hidden = 'false'; if(!editingProbeNode.value.reset_day) editingProbeNode.value.reset_day = '1'; probeEditModalOpen.value = true; };
                 const saveProbeEdit = async () => { await fetchApi('/api/probe/admin/server', { method: 'PUT', body: JSON.stringify(editingProbeNode.value) }); probeEditModalOpen.value = false; refreshData(); fetchProbeData(); };
                 const deleteProbeNode = async (id) => { if (!confirm("⚠️ 确定要彻底删除该探针记录吗？如果机器还在运行 Agent，之后会自动复活！请确保先在面板的「服务器与节点」中删除此机器。")) return; await fetchApi(`/api/probe/admin/server?id=${id}`, { method: 'DELETE' }); refreshData(); fetchProbeData(); };
@@ -1680,7 +1689,7 @@
                     getNodesByIp, getVpsName, formatBytes, formatDate, getExpireText, getTrafficPercent, getPingColor, isOnline, generateCmd, generateSubLink, copyCommand,
                     globalOnline, globalTraffic, globalSpeedIn, globalSpeedOut, deployOsMap, saveOsMap, siteTitle, siteTitleInput, saveSiteTitle, userNewPassword, updateUserPassword, resetMySubLink, generateUUIDForNewUser, batchStartPort, batchUser, deployAllProtocols,
                     probeSys, publicProbeServers, filteredProbeServers, probeView, probeDetailId, probeDetail, setProbeView, openProbeDetail, probeGlobalOnline, probeGlobalOffline, probeGlobalSpeedIn, probeGlobalSpeedOut, probeGlobalNetRx, probeGlobalNetTx, filteredProbeGroups, probeCountryStats, currentFilter,
-                    saveProbeSettings, adminProbeServers, probeEditModalOpen, editingProbeNode, openProbeEditModal, saveProbeEdit, deleteProbeNode, currentDomain,
+                    saveProbeSettings, saveSubscriptionProtection, adminProbeServers, probeEditModalOpen, editingProbeNode, openProbeEditModal, saveProbeEdit, deleteProbeNode, currentDomain,
                     thirdPartySubscriptions, newThirdParty, loadingThirdParty, loadThirdPartySubscriptions, addThirdPartySubscription, toggleThirdPartySubscription, deleteThirdPartySubscription,
                     qrModalOpen, qrCodeImage, showQrCode, 
                     showWelcomePopup, closePopup,
