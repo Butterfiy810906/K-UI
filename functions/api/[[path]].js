@@ -23,6 +23,34 @@ async function sessionToken() { const bytes = crypto.getRandomValues(new Uint8Ar
 
 function updateManifest(component, sha, length) { return `v1\n${component}\n${sha}\n${length}\n`; }
 
+function protectedSubscriptionResponse(format) {
+    // Return a syntactically valid but harmless profile. It avoids exposing
+    // token validity, installed nodes, or whether protection is enabled.
+    if (format === 'clash') {
+        const profile = `port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: silent
+ipv6: false
+
+proxies: []
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+
+rules:
+  - MATCH,DIRECT
+`;
+        return new Response(profile, { headers: { "Content-Type": "text/yaml; charset=utf-8", "Cache-Control": "private, max-age=300" } });
+    }
+    const placeholder = '# KUI subscription profile\n# No proxy entries are currently published\n';
+    return new Response(btoa(unescape(encodeURIComponent(placeholder))), { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "private, max-age=300" } });
+}
+
 const MAX_REPORT_BYTES = 256 * 1024;
 const MAX_PROXY_REPORT_BYTES = 32 * 1024;
 const MAX_SUBSCRIPTION_BYTES = 2 * 1024 * 1024;
@@ -1252,9 +1280,8 @@ export async function onRequest(context) {
         await ensureDbSchema(db);
         const subscriptionProtection = await db.prepare("SELECT value FROM probe_settings WHERE key = 'subscription_protection'").first();
         if (subscriptionProtection?.value === 'true') {
-            // Match an ordinary missing API route. Do not reveal whether the
-            // subscription exists or whether protection is enabled.
-            return json({ error: "Not found" }, 404);
+            const format = new URL(request.url).searchParams.get("format");
+            return protectedSubscriptionResponse(format);
         }
         const urlObj = new URL(request.url); 
         const ip = urlObj.searchParams.get("ip"); 
@@ -1274,8 +1301,8 @@ export async function onRequest(context) {
             if (u) isValid = !!u.sub_token && token === u.sub_token;
         }
         
-        // Invalid and protected subscription URLs deliberately look identical
-        // to absent endpoints, preventing token validity probing.
+        // Invalid tokens deliberately look like absent endpoints. Protected
+        // subscriptions return a harmless HTTP 200 profile before validation.
         if (!isValid) return json({ error: "Not found" }, 404);
         
         const now = Date.now(); 
